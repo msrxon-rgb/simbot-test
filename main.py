@@ -93,7 +93,7 @@ async def analyze_style(posts: list) -> Dict:
     
     try:
         response = client.models.generate_content(
-           "gemini-1.5-flash",
+            model="gemini-1.5-flash", # model= kalit so'zini qo'shing
             contents=prompt
         )
         cleaned_text = clean_json_response(response.text)
