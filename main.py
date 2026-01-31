@@ -2,23 +2,30 @@ import logging
 import json
 import os
 import re
+import asyncio
 from typing import Dict, Any
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     ContextTypes, filters, ConversationHandler
 )
-# Yangi SDK: pip install google-genai
-from google import genai 
+# Muhim: pip install google-genai
+from google import genai
 
 # ============================================
-# API KALITLAR (Railway variables bilan moslash)
+# API KALITLAR (Railway Variables bilan bir xil bo'lishi shart)
 # ============================================
-TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN") # Railwaydagi nom bilan bir xil
-GEMINI_API_KEY = os.getenv("GEMINI_KEY")    # Railwaydagi nom bilan bir xil
+TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_KEY")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+# Gemini Klientini tekshirib ishga tushirish
+if GEMINI_API_KEY:
+    client = genai.Client(api_key=GEMINI_API_KEY)
+else:
+    client = None
 
+# ============================================
+# LOGGING SOZLAMALARI
 # ============================================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -31,7 +38,7 @@ USER_DATA_FILE = "user_profiles.json"
 USER_PROFILES: Dict[str, Any] = {}
 
 # ============================================
-# DATA SAQLASH
+# MA'LUMOTLARNI SAQLASH
 # ============================================
 
 def load_profiles():
@@ -40,54 +47,67 @@ def load_profiles():
         try:
             with open(USER_DATA_FILE, "r", encoding="utf-8") as f:
                 USER_PROFILES = json.load(f)
-        except:
+        except Exception as e:
+            logger.error(f"Fayl yuklashda xato: {e}")
             USER_PROFILES = {}
 
-def save_profiles():
-    with open(USER_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(USER_PROFILES, f, ensure_ascii=False, indent=2)
+def save_profile(user_id: int, profile: Dict):
+    USER_PROFILES[str(user_id)] = profile
+    try:
+        with open(USER_DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(USER_PROFILES, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Saqlashda xato: {e}")
 
 # ============================================
-# AI JAVOBINI TOZALASH (MUHIM!)
+# YORDAMCHI FUNKSIYALAR
 # ============================================
 
 def clean_json_response(text: str) -> str:
-    """Gemini qaytargan ```json ... ``` qismini tozalaydi"""
+    """Gemini qaytargan ```json ... ``` qismini olib tashlaydi"""
     text = re.sub(r'```json\s*', '', text)
     text = re.sub(r'\s*```', '', text)
     return text.strip()
+
+def main_keyboard():
+    keyboard = [
+        [KeyboardButton("📊 Kanalni o'rganish")],
+        [KeyboardButton("🎲 Random post"), KeyboardButton("📝 Mavzu bo'yicha post")],
+        [KeyboardButton("ℹ️ Yordam")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # ============================================
 # GEMINI AI FUNKSIYALARI
 # ============================================
 
 async def analyze_style(posts: list) -> Dict:
+    if not client: return {"error": "API Key yo'q"}
+    
     text = "\n\n".join(posts)
     prompt = f"""
     Quyidagi Telegram postlar asosida kanal uslubini tahlil qil va FAQAT JSON qaytar:
     {text}
-    JSON kalitlari: asosiy_mavzular, yozish_uslubi, post_uzunligi, emoji_darajasi, post_tuzilishi, maqsadli_auditoriya, asosiy_xususiyatlar
+    JSON kalitlari: asosiy_mavzular, yozish_uslubi, emoji_darajasi, auditoriya.
     """
     
     try:
-        # Yangi SDK uslubi
         response = client.models.generate_content(
             model="gemini-1.5-flash",
             contents=prompt
         )
-        
         cleaned_text = clean_json_response(response.text)
-        data = json.loads(cleaned_text)
-        data["sample_posts"] = posts[:5]
-        return data
+        return json.loads(cleaned_text)
     except Exception as e:
-        logger.error(f"AI Analizda xato: {e}")
-        return {"asosiy_mavzular": "Umumiy", "yozish_uslubi": "Oddiy"}
+        logger.error(f"Analiz xatosi: {e}")
+        return {"yozish_uslubi": "Oddiy", "emoji_darajasi": "O'rtacha"}
 
 async def generate_post(style: Dict, topic: str | None = None) -> str:
-    desc = f"Mavzular: {style.get('asosiy_mavzular')}. Uslub: {style.get('yozish_uslubi')}. Emoji: {style.get('emoji_darajasi')}."
-    task = f"Mavzu: {topic}" if topic else "Shu uslubda yangi, qiziqarli post yoz."
-    prompt = f"Kanal uslubi tahlili: {desc}\n\nTopshiriq: {task}\n\nFaqat post matnini yoz. O'zbek tilida."
+    if not client: return "❌ Gemini API kaliti ulanmagan."
+    
+    desc = f"Uslub: {style.get('yozish_uslubi')}. Emoji: {style.get('emoji_darajasi')}."
+    task = f"Mavzu: {topic}" if topic else "Qiziqarli yangi post yoz."
+    prompt = f"Kanal uslubi: {desc}\nTopshiriq: {task}\nFaqat o'zbekcha post matnini qaytar."
 
     try:
         response = client.models.generate_content(
@@ -99,67 +119,91 @@ async def generate_post(style: Dict, topic: str | None = None) -> str:
         return f"❌ Xatolik yuz berdi: {str(e)}"
 
 # ============================================
-# BOT HANDLERLAR
+# BOT HANDLERLARI
 # ============================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if str(user_id) not in USER_PROFILES:
-        USER_PROFILES[str(user_id)] = {}
-    
     await update.message.reply_text(
-        "Assalomu alaykum! 🤖 SMM AI botga xush kelibsiz.\nKanalingiz linkini bering, men uni o'rganib chiqaman.",
+        "Assalomu alaykum! 🤖 SMM AI botingiz tayyor.\n\n"
+        "1. 'Kanalni o'rganish' tugmasini bosing.\n"
+        "2. Kanal linkini yuboring.\n"
+        "3. Men sizga mos postlar yozib beraman.",
         reply_markup=main_keyboard()
     )
 
-async def process_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text # Oddiy linkni normalize qilish funksiyangiz ishlaydi
-    msg = await update.message.reply_text("⏳ Kanal tahlil qilinmoqda, kuting...")
-    
-    # Demo o'rniga AI tahlilni chaqiramiz
-    posts = [
-        "🚀 Bugun yangi loyiha boshladik!",
-        "💡 Maslahat: Har kuni 10 daqiqa o'zingizga vaqt ajrating.",
-        "🔥 Chegirmalar boshlandi!"
-    ]
-    
-    style_data = await analyze_style(posts)
-    USER_PROFILES[str(update.effective_user.id)] = {"style": style_data}
-    save_profiles()
+async def analyze_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Kanal linkini yoki oxirgi postlarni yuboring:")
+    return WAITING_CHANNEL_LINK
 
-    await msg.edit_text("✅ Kanal uslubi muvaffaqiyatli saqlandi! Endi post yaratishingiz mumkin.")
+async def process_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("⏳ Kanal tahlil qilinmoqda...")
+    
+    # Test uchun demo postlar (bu yerga scraper ulasangiz bo'ladi)
+    demo_posts = ["Salom! Bugun yangi kun.", "Chegirmalar tugashiga 2 kun qoldi! 🔥"]
+    
+    style_data = await analyze_style(demo_posts)
+    save_profile(update.effective_user.id, {"style": style_data})
+
+    await msg.edit_text("✅ Tahlil yakunlandi! Endi post yaratishingiz mumkin.", reply_markup=main_keyboard())
     return ConversationHandler.END
 
-# Qolgan funksiyalarni (main_keyboard, random_post va h.k.) o'z holicha qoldiring
-# Faqat USER_PROFILES[str(user_id)] shaklida chaqirishni unutmang.
+async def random_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in USER_PROFILES:
+        await update.message.reply_text("Avval kanalni o'rgating!")
+        return
+
+    msg = await update.message.reply_text("📝 Post tayyorlanmoqda...")
+    post = await generate_post(USER_PROFILES[user_id]["style"])
+    await msg.delete()
+    await update.message.reply_text(post)
+
+async def topic_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Post mavzusini yozing:")
+    return WAITING_TOPIC
+
+async def topic_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    topic = update.message.text
+    msg = await update.message.reply_text("📝 Post yozilmoqda...")
+    post = await generate_post(USER_PROFILES[user_id]["style"], topic)
+    await msg.delete()
+    await update.message.reply_text(post)
+    return ConversationHandler.END
+
+# ============================================
+# ASOSIY ISHGA TUSHIRISH
+# ============================================
 
 def main():
     load_profiles()
-    # Tokenni tekshirish
+    
     if not TELEGRAM_BOT_TOKEN:
-        logger.error("BOT_TOKEN topilmadi!")
+        print("XATO: BOT_TOKEN topilmadi!")
         return
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Handlerlarni qo'shish (Sizning kodingizdagidek...)
-    app.add_handler(CommandHandler("start", start))
-    
-    # ConversationHandlerlar...
-    conv_handler = ConversationHandler(
+    # Conversation Handlerlar
+    analyze_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("📊 Kanalni o'rganish"), analyze_start)],
-        states={
-            WAITING_CHANNEL_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_link)]
-        },
+        states={WAITING_CHANNEL_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_link)]},
         fallbacks=[CommandHandler("start", start)]
     )
-    app.add_handler(conv_handler)
-    
-    # Boshqa xabarlar uchun
-    app.add_handler(MessageHandler(filters.Regex("🎲 Random post"), random_post))
-    app.add_handler(MessageHandler(filters.Regex("ℹ️ Yordam"), help_cmd))
 
-    print("Bot ishga tushdi...")
+    topic_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("📝 Mavzu bo'yicha post"), topic_start)],
+        states={WAITING_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, topic_process)]},
+        fallbacks=[CommandHandler("start", start)]
+    )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(analyze_conv)
+    app.add_handler(topic_conv)
+    app.add_handler(MessageHandler(filters.Regex("🎲 Random post"), random_post))
+    app.add_handler(MessageHandler(filters.Regex("ℹ️ Yordam"), start))
+
+    print("Bot polling boshladi...")
     app.run_polling()
 
 if __name__ == "__main__":
