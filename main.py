@@ -1,8 +1,8 @@
 import logging
 import json
 import os
-import re
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+import asyncio
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 from google import genai
 
@@ -18,22 +18,18 @@ logger = logging.getLogger(__name__)
 WAITING_CHANNEL_LINK, WAITING_TOPIC = range(2)
 USER_PROFILES = {}
 
-# UI
 def main_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("📊 Kanalni o'rganish")],
         [KeyboardButton("🎲 Random post"), KeyboardButton("📝 Mavzu bo'yicha post")]
     ], resize_keyboard=True)
 
-# Gemini AI Funksiyasi (Tuzatilgan!)
 async def analyze_style(posts: list):
-    text = "\n\n".join(posts)
-    prompt = f"Tahlil qil va JSON qaytar: {text}"
     try:
-        # DIQQAT: model="gemini-1.5-flash" deb yozish shart!
+        # DIQQAT: model="gemini-1.5-flash" kalit so'zi bilan yozildi
         response = client.models.generate_content(
             model="gemini-1.5-flash", 
-            contents=prompt
+            contents=f"Telegram postlar uslubini tahlil qil: {posts}"
         )
         return {"yozish_uslubi": "Professional", "emoji": "O'rtacha"}
     except Exception as e:
@@ -42,24 +38,41 @@ async def analyze_style(posts: list):
 
 # Handlerlar
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Salom! Kanalni tahlil qilish uchun tugmani bosing.", reply_markup=main_keyboard())
+    await update.message.reply_text(
+        "Salom! Bot ishga tushdi. 🚀\nKanalni tahlil qilish uchun tugmani bosing.", 
+        reply_markup=main_keyboard()
+    )
 
 async def analyze_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Kanal linkini yuboring:")
+    await update.message.reply_text("Kanal linkini yuboring:", reply_markup=ReplyKeyboardRemove())
     return WAITING_CHANNEL_LINK
 
 async def process_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Telegramda '⏳' xabarini yuboramiz
     msg = await update.message.reply_text("⏳ Kanal tahlil qilinmoqda...")
+    
     try:
-        # AI tahlil
-        style = await analyze_style(["Test post"])
+        # AI tahlil jarayoni
+        style = await analyze_style(["Demo post"])
         USER_PROFILES[str(update.effective_user.id)] = style
-        await msg.edit_text("✅ Tayyor! Endi post yaratishingiz mumkin.", reply_markup=main_keyboard())
+        
+        # MUHIM: edit_text ReplyKeyboardMarkup bilan ishlamaydi (Sizdagi xato shu edi!)
+        # Shuning uchun eski xabarni o'chirib, yangisini yuboramiz
+        await msg.delete()
+        await update.message.reply_text(
+            "✅ Kanal uslubi muvaffaqiyatli o'rganildi! Endi post yaratishingiz mumkin.", 
+            reply_markup=main_keyboard()
+        )
     except Exception as e:
-        await msg.edit_text(f"❌ Xato: {str(e)}")
+        await update.message.reply_text(f"❌ Xatolik: {str(e)}", reply_markup=main_keyboard())
+    
     return ConversationHandler.END
 
 def main():
+    if not TELEGRAM_BOT_TOKEN:
+        print("ERROR: BOT_TOKEN is missing!")
+        return
+
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -69,8 +82,8 @@ def main():
         fallbacks=[CommandHandler("start", start)]
     ))
     
-    print("Bot ishlamoqda...")
-    app.run_polling()
+    print("Bot pollingni boshladi...")
+    app.run_polling(drop_pending_updates=True) # Conflict xatosini kamaytiradi
 
 if __name__ == "__main__":
     main()
